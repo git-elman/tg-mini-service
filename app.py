@@ -1,4 +1,3 @@
-
 import os
 from datetime import datetime, timedelta
 from typing import List
@@ -22,7 +21,7 @@ API_KEY = os.environ.get("API_KEY", "")         # simple shared key for n8n requ
 client = TelegramClient(StringSession(STRING), API_ID, API_HASH)
 
 # ---- FASTAPI ----
-app = FastAPI(title="tg-mini", version="1.0.0")
+app = FastAPI(title="tg-mini", version="1.1.0")
 app.add_middleware(
     CORSMiddleware,
     allow_origins=["*"],
@@ -37,18 +36,25 @@ class Post(BaseModel):
     link: str
     views: int
     forwards: int
+    coef_pct: float
     text: str
+
+def _sanitize_username(s: str) -> str:
+    """Возвращает username без @ и хвостов пути (из @user или https://t.me/user/123)."""
+    s = (s or "").strip()
+    s = s.replace("https://t.me/", "").replace("http://t.me/", "")
+    s = s.replace("https://telegram.me/", "").replace("http://telegram.me/", "")
+    s = s.lstrip("@")
+    return s.split("/")[0]
 
 @app.middleware("http")
 async def check_api_key(request: Request, call_next):
-    # optional lightweight protection
     if API_KEY and request.headers.get("x-api-key") != API_KEY:
         return JSONResponse(status_code=401, content={"detail": "Unauthorized"})
     return await call_next(request)
 
 @app.on_event("startup")
 async def _startup():
-    # Will reuse saved StringSession from env
     await client.start()
 
 @app.get("/", tags=["health"])
@@ -60,8 +66,11 @@ async def healthz():
     return {"ok": True}
 
 @app.get("/posts", response_model=List[Post], tags=["data"])
-async def get_posts(channel: str, days: int = 7):
-    """Return posts from a public channel for the last N days with views/forwards."""
+async def get_posts(channel: str, days: int = 7, min_coef: float = 3.0):
+    """
+    Вернёт посты публичного канала за N дней с метриками и коэффициентом.
+    Отфильтрованы по порогу coef_pct >= min_coef (по умолчанию 3%).
+    """
     try:
         entity = await client.get_entity(channel)
     except Exception as e:
@@ -69,24 +78,36 @@ async def get_posts(channel: str, days: int = 7):
             raise HTTPException(status_code=404, detail="Channel not found")
         raise HTTPException(status_code=400, detail=str(e))
 
+    # username из Telegram, а если его нет — берём из параметра запроса
+    requested = _sanitize_username(channel)
+    uname = getattr(entity, "username", None) or requested
+
     since = datetime.utcnow() - timedelta(days=days)
-    items = []
+    items: List[Post] = []
     async for m in client.iter_messages(entity):
         if not getattr(m, "date", None):
             continue
         if m.date.replace(tzinfo=None) < since:
             break
+
         views = int(getattr(m, "views", 0) or 0)
         forwards = int(getattr(m, "forwards", 0) or 0)
-        uname = getattr(entity, "username", None)
+        coef = (forwards / views * 100.0) if views else 0.0
+
+        # фильтр по порогу, по умолчанию 3%
+        if coef < float(min_coef):
+            continue
+
         link = f"https://t.me/{uname}/{m.id}" if uname else ""
         text = (m.message or "")[:180].replace("\n", " ")
-        items.append({
-            "date": m.date.isoformat(),
-            "channel": f"@{uname}" if uname else str(entity.id),
-            "link": link,
-            "views": views,
-            "forwards": forwards,
-            "text": text
-        })
+
+        items.append(Post(
+            date=m.date.isoformat(),
+            channel=f"@{uname}" if uname else "",
+            link=link,
+            views=views,
+            forwards=forwards,
+            coef_pct=round(coef, 2),
+            text=text
+        ))
     return items
