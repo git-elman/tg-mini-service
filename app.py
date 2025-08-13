@@ -21,7 +21,7 @@ API_KEY = os.environ.get("API_KEY", "")         # simple shared key for n8n requ
 client = TelegramClient(StringSession(STRING), API_ID, API_HASH)
 
 # ---- FASTAPI ----
-app = FastAPI(title="tg-mini", version="1.1.0")
+app = FastAPI(title="tg-mini", version="1.2.0")
 app.add_middleware(
     CORSMiddleware,
     allow_origins=["*"],
@@ -66,10 +66,15 @@ async def healthz():
     return {"ok": True}
 
 @app.get("/posts", response_model=List[Post], tags=["data"])
-async def get_posts(channel: str, days: int = 7, min_coef: float = 3.0):
+async def get_posts(
+    channel: str,
+    days: int = 7,
+    min_coef: float = 3.0,
+    max_chars: int = 0,     # 0 -> полный текст; >0 -> обрезать до указанного кол-ва символов
+):
     """
     Вернёт посты публичного канала за N дней с метриками и коэффициентом.
-    Отфильтрованы по порогу coef_pct >= min_coef (по умолчанию 3%).
+    Фильтрует по coef_pct >= min_coef. Текст по умолчанию полный (max_chars=0).
     """
     try:
         entity = await client.get_entity(channel)
@@ -78,7 +83,6 @@ async def get_posts(channel: str, days: int = 7, min_coef: float = 3.0):
             raise HTTPException(status_code=404, detail="Channel not found")
         raise HTTPException(status_code=400, detail=str(e))
 
-    # username из Telegram, а если его нет — берём из параметра запроса
     requested = _sanitize_username(channel)
     uname = getattr(entity, "username", None) or requested
 
@@ -93,13 +97,15 @@ async def get_posts(channel: str, days: int = 7, min_coef: float = 3.0):
         views = int(getattr(m, "views", 0) or 0)
         forwards = int(getattr(m, "forwards", 0) or 0)
         coef = (forwards / views * 100.0) if views else 0.0
-
-        # фильтр по порогу, по умолчанию 3%
         if coef < float(min_coef):
             continue
 
         link = f"https://t.me/{uname}/{m.id}" if uname else ""
-        text = (m.message or "")[:180].replace("\n", " ")
+
+        raw_text = (m.message or "")
+        if max_chars and max_chars > 0:
+            raw_text = raw_text[:max_chars]
+        text = raw_text.replace("\n", " ")
 
         items.append(Post(
             date=m.date.isoformat(),
