@@ -1,0 +1,8 @@
+
+# Test requests (use VSCode REST Client or just for reference)
+GET https://<name>.onrender.com/
+x-api-key: <your-key>
+
+###
+GET https://<name>.onrender.com/posts?channel=@durov&days=7
+x-api-key: <your-key>
